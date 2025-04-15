@@ -87,6 +87,122 @@ def prepare_rendering_results(person_data, nframes):
     return frame_results
 
 
+def load_keypoints_from_json(json_file):
+    """
+    Load 2D keypoints from a JSON file.
+
+    The JSON file can have two formats:
+    1. Separate body, face, and hand keypoints arrays:
+    {
+        "frames": [
+            {
+                "frame_id": 0,  // Frame index
+                "people": [
+                    {
+                        "person_id": 0,  // Person identifier
+                        "keypoints": [x1, y1, c1, x2, y2, c2, ...],  // Body keypoints (17 joints, each with x, y, confidence)
+                        "face_keypoints": [x1, y1, c1, x2, y2, c2, ...],  // Face keypoints (68 joints)
+                        "hand_left_keypoints": [x1, y1, c1, x2, y2, c2, ...],  // Left hand keypoints (21 joints)
+                        "hand_right_keypoints": [x1, y1, c1, x2, y2, c2, ...]   // Right hand keypoints (21 joints)
+                    }
+                ]
+            }
+        ]
+    }
+
+    2. COCO Whole-Body format with a single flattened keypoints array:
+    {
+        "frames": [
+            {
+                "frame_id": 0,
+                "people": [
+                    {
+                        "person_id": 0,
+                        "keypoints": [x1, y1, c1, x2, y2, c2, ...],  // All keypoints (133 joints: 17 body, 6 foot, 68 face, 21 left hand, 21 right hand)
+                    }
+                ]
+            }
+        ]
+    }
+
+    Returns:
+        Dictionary with person tracklets and keypoints
+    """
+    print(f'Loading keypoints from JSON file: {json_file}')
+
+    with open(json_file, 'r') as f:
+        data = json.load(f)
+
+    tracking_results = {}
+
+    for frame_data in data.get('frames', []):
+        frame_id = frame_data.get('frame_id', 0)
+
+        for person in frame_data.get('people', []):
+            person_id = str(person.get('person_id', 0))
+
+            # Check if we have whole-body keypoints or separate keypoints
+            if 'keypoints' in person and len(person['keypoints']) > 51 and not ('face_keypoints' in person or 'hand_left_keypoints' in person):
+                # Assume COCO Whole-Body format with flattened keypoints
+                all_keypoints = np.array(person['keypoints']).reshape(-1, 3)
+
+                # Split into different body parts
+                # COCO Whole-Body has: 17 body + 6 foot + 68 face + 21 left hand + 21 right hand = 133 joints
+                body_keypoints = all_keypoints[:17]  # Original COCO body keypoints
+                foot_keypoints = all_keypoints[17:23]  # Foot keypoints
+                face_keypoints = all_keypoints[23:91]  # Face keypoints
+                left_hand_keypoints = all_keypoints[91:112]  # Left hand keypoints
+                right_hand_keypoints = all_keypoints[112:133]  # Right hand keypoints
+
+                # We don't use foot keypoints in the current implementation
+                _ = foot_keypoints  # Unused but kept for clarity
+            else:
+                # Original format with separate keypoint arrays
+                body_keypoints = np.array(person.get('keypoints', [])).reshape(-1, 3)
+                face_keypoints = np.array(person.get('face_keypoints', [])).reshape(-1, 3)
+                left_hand_keypoints = np.array(person.get('hand_left_keypoints', [])).reshape(-1, 3)
+                right_hand_keypoints = np.array(person.get('hand_right_keypoints', [])).reshape(-1, 3)
+
+            # Create a new person entry if it doesn't exist
+            if person_id not in tracking_results:
+                tracking_results[person_id] = {
+                    'frames': [],
+                    'joints2d': [],
+                    'joints2d_lhand': [],
+                    'joints2d_rhand': [],
+                    'joints2d_face': [],
+                    'vis_face': [],
+                    'vis_lhand': [],
+                    'vis_rhand': [],
+                }
+
+            # Add frame data
+            tracking_results[person_id]['frames'].append(frame_id)
+            tracking_results[person_id]['joints2d'].append(body_keypoints)
+            tracking_results[person_id]['joints2d_face'].append(face_keypoints)
+            tracking_results[person_id]['joints2d_lhand'].append(left_hand_keypoints)
+            tracking_results[person_id]['joints2d_rhand'].append(right_hand_keypoints)
+
+            # Calculate visibility scores (mean of confidence values)
+            if len(face_keypoints) > 0:
+                tracking_results[person_id]['vis_face'].append(np.mean(face_keypoints[:, 2]))
+            else:
+                tracking_results[person_id]['vis_face'].append(0.0)
+
+            if len(left_hand_keypoints) > 0:
+                tracking_results[person_id]['vis_lhand'].append(np.mean(left_hand_keypoints[:, 2]))
+            else:
+                tracking_results[person_id]['vis_lhand'].append(0.0)
+
+            if len(right_hand_keypoints) > 0:
+                tracking_results[person_id]['vis_rhand'].append(np.mean(right_hand_keypoints[:, 2]))
+            else:
+                tracking_results[person_id]['vis_rhand'].append(0.0)
+
+    print(f'Loaded {len(tracking_results)} persons from {json_file}')
+    return tracking_results
+
+
 def run_demo(args):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
@@ -105,7 +221,7 @@ def run_demo(args):
 
         if not os.path.isfile(video_file):
             exit(f'Input video \"{video_file}\" does not exist!')
-        
+
         output_path = os.path.join(args.output_folder, os.path.basename(video_file).replace('.mp4', ''))
 
         image_folder, num_frames, img_shape = video_to_images(video_file, return_info=True)
@@ -125,55 +241,66 @@ def run_demo(args):
     args.device = device
     args.pin_memory = True if torch.cuda.is_available() else False
 
-    # pifpaf person detection 
+    # pifpaf person detection
     pp_det_file_path = os.path.join(output_path, 'pp_det_results.pkl')
     pp_args = copy.deepcopy(args)
     pp_args.force_complete_pose = True
-    ppdecoder.configure(pp_args)
-    ppnetwork.Factory.configure(pp_args)
-    ppnetwork.Factory.checkpoint = pp_args.detector_checkpoint
-    Predictor.configure(pp_args)
-    Stream.configure(pp_args)
 
-    Predictor.batch_size = pp_args.detector_batch_size
-    if pp_args.detector_batch_size > 1:
-        Predictor.long_edge = 1000
-    Predictor.loader_workers = 1
-    predictor = Predictor()
-    if args.vid_file is not None:
-        capture = Stream(args.vid_file, preprocess=predictor.preprocess)
-        capture = predictor.dataset(capture)
-    elif args.image_folder is not None:
-        image_file_names = sorted([
-            osp.join(image_folder, x)
-            for x in os.listdir(image_folder)
-            if x.endswith('.png') or x.endswith('.jpg')
-        ])
-        capture = predictor.images(image_file_names)
+    # Initialize pifpaf only if not using JSON keypoints
+    if not (args.keypoints_json and os.path.exists(args.keypoints_json)):
+        ppdecoder.configure(pp_args)
+        ppnetwork.Factory.configure(pp_args)
+        ppnetwork.Factory.checkpoint = pp_args.detector_checkpoint
+        Predictor.configure(pp_args)
+        Stream.configure(pp_args)
+
+        Predictor.batch_size = pp_args.detector_batch_size
+        if pp_args.detector_batch_size > 1:
+            Predictor.long_edge = 1000
+        Predictor.loader_workers = 1
+        predictor = Predictor()
+        if args.vid_file is not None:
+            capture = Stream(args.vid_file, preprocess=predictor.preprocess)
+            capture = predictor.dataset(capture)
+        elif args.image_folder is not None:
+            image_file_names = sorted([
+                osp.join(image_folder, x)
+                for x in os.listdir(image_folder)
+                if x.endswith('.png') or x.endswith('.jpg')
+            ])
+            capture = predictor.images(image_file_names)
 
     tracking_results = {}
-    print('Running openpifpaf for person detection...')
-    for preds, _, meta in tqdm(capture, total=num_frames // args.detector_batch_size):
-        if args.single_person:
-            preds = [preds[0]]
-        for pid, ann in enumerate(preds):
-            if ann.score > args.detection_threshold:
-                frame_i = meta['frame_i'] - 1 if 'frame_i' in meta else meta['dataset_index']
-                file_name = meta['file_name'] if 'file_name' in meta else image_folder
-                person_id = file_name.split('/')[-1].split('.')[0] + '_f' + str(frame_i) + '_p' + str(pid)
-                det_wb_kps = ann.data
-                det_face_kps = det_wb_kps[23:91]
-                tracking_results[person_id] = {
-                            'frames': [frame_i],
-                            # 'predictions': [ann.json_data() for ann in preds]
-                            'joints2d': [det_wb_kps[:17]],
-                            'joints2d_lhand': [det_wb_kps[91:112]],
-                            'joints2d_rhand': [det_wb_kps[112:133]],
-                            'joints2d_face': [np.concatenate([det_face_kps[17:], det_face_kps[:17]])],
-                            'vis_face': [np.mean(det_face_kps[17:, -1])],
-                            'vis_lhand': [np.mean(det_wb_kps[91:112, -1])],
-                            'vis_rhand': [np.mean(det_wb_kps[112:133, -1])],
-                        }
+
+    # Use keypoints from JSON file if provided
+    if args.keypoints_json and os.path.exists(args.keypoints_json):
+        print(f'Loading keypoints from JSON file: {args.keypoints_json}')
+        tracking_results = load_keypoints_from_json(args.keypoints_json)
+    else:
+        print('Running openpifpaf for person detection...')
+        for preds, _, meta in tqdm(capture, total=num_frames // args.detector_batch_size):
+            if args.single_person:
+                preds = [preds[0]]
+            for pid, ann in enumerate(preds):
+                if ann.score > args.detection_threshold:
+                    frame_i = meta['frame_i'] - 1 if 'frame_i' in meta else meta['dataset_index']
+                    file_name = meta['file_name'] if 'file_name' in meta else image_folder
+                    person_id = file_name.split('/')[-1].split('.')[0] + '_f' + str(frame_i) + '_p' + str(pid)
+                    det_wb_kps = ann.data
+                    det_face_kps = det_wb_kps[23:91]
+                    tracking_results[person_id] = {
+                                'frames': [frame_i],
+                                # 'predictions': [ann.json_data() for ann in preds]
+                                'joints2d': [det_wb_kps[:17]],
+                                'joints2d_lhand': [det_wb_kps[91:112]],
+                                'joints2d_rhand': [det_wb_kps[112:133]],
+                                'joints2d_face': [np.concatenate([det_face_kps[17:], det_face_kps[:17]])],
+                                'vis_face': [np.mean(det_face_kps[17:, -1])],
+                                'vis_lhand': [np.mean(det_wb_kps[91:112, -1])],
+                                'vis_rhand': [np.mean(det_wb_kps[112:133, -1])],
+                            }
+
+    # Save tracking results
     pkle.dump(tracking_results, open(pp_det_file_path, 'wb'))
 
     bbox_scale = 1.0
@@ -306,7 +433,7 @@ def run_demo(args):
             smplx_params = []
 
             for batch in tqdm(dataloader):
-                
+
                 batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k,v in batch.items()}
 
                 person_ids.extend(batch['person_id'])
@@ -500,7 +627,7 @@ def run_demo(args):
                 imsave(os.path.join(output_img_folder, 'arm', f'{frame_idx:06d}.png'), img_arm)
             else:
                 imsave(os.path.join(output_img_folder, osp.split(img_fname)[-1][:-4]+'.png'), img_full)
-                imsave(os.path.join(output_img_folder, 'arm', osp.split(img_fname)[-1][:-4]+'.png'), img_arm)                
+                imsave(os.path.join(output_img_folder, 'arm', osp.split(img_fname)[-1][:-4]+'.png'), img_arm)
 
             if args.display:
                 cv2.imshow('Video', img)
@@ -562,9 +689,9 @@ if __name__ == '__main__':
                         help='config file path.')
     parser.add_argument('--pretrained_model', default=None,
                         help='Path to network checkpoint')
-    parser.add_argument('--pretrained_body', default=None, help='Load a pretrained checkpoint for body at the beginning training') 
-    parser.add_argument('--pretrained_hand', default=None, help='Load a pretrained checkpoint for hand at the beginning training') 
-    parser.add_argument('--pretrained_face', default=None, help='Load a pretrained checkpoint for face at the beginning training') 
+    parser.add_argument('--pretrained_body', default=None, help='Load a pretrained checkpoint for body at the beginning training')
+    parser.add_argument('--pretrained_hand', default=None, help='Load a pretrained checkpoint for hand at the beginning training')
+    parser.add_argument('--pretrained_face', default=None, help='Load a pretrained checkpoint for face at the beginning training')
 
     parser.add_argument('--misc', default=None, type=str, nargs="*",
                         help='other parameters')
@@ -588,6 +715,8 @@ if __name__ == '__main__':
                         help='use the ground truth tracking annotations.')
     parser.add_argument('--anno_file', type=str, default='',
                         help='path to tracking annotation file.')
+    parser.add_argument('--keypoints_json', type=str, default='',
+                        help='path to JSON file containing 2D keypoints by frame.')
     parser.add_argument('--render_ratio', type=float, default=1.,
                         help='ratio for render resolution')
     parser.add_argument('--recon_result_file', type=str, default='',
