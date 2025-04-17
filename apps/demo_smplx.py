@@ -91,39 +91,8 @@ def load_keypoints_from_json(json_file):
     """
     Load 2D keypoints from a JSON file.
 
-    The JSON file can have two formats:
-    1. Separate body, face, and hand keypoints arrays:
-    {
-        "frames": [
-            {
-                "frame_id": 0,  // Frame index
-                "people": [
-                    {
-                        "person_id": 0,  // Person identifier
-                        "keypoints": [x1, y1, c1, x2, y2, c2, ...],  // Body keypoints (17 joints, each with x, y, confidence)
-                        "face_keypoints": [x1, y1, c1, x2, y2, c2, ...],  // Face keypoints (68 joints)
-                        "hand_left_keypoints": [x1, y1, c1, x2, y2, c2, ...],  // Left hand keypoints (21 joints)
-                        "hand_right_keypoints": [x1, y1, c1, x2, y2, c2, ...]   // Right hand keypoints (21 joints)
-                    }
-                ]
-            }
-        ]
-    }
-
-    2. COCO Whole-Body format with a single flattened keypoints array:
-    {
-        "frames": [
-            {
-                "frame_id": 0,
-                "people": [
-                    {
-                        "person_id": 0,
-                        "keypoints": [x1, y1, c1, x2, y2, c2, ...],  // All keypoints (133 joints: 17 body, 6 foot, 68 face, 21 left hand, 21 right hand)
-                    }
-                ]
-            }
-        ]
-    }
+    This function only supports the Named Keypoints Format:
+    Named keypoints format with keys like 'nose', 'left_eye', etc. each containing x, y, confidence.
 
     Returns:
         Dictionary with person tracklets and keypoints
@@ -135,69 +104,136 @@ def load_keypoints_from_json(json_file):
 
     tracking_results = {}
 
-    for frame_data in data.get('frames', []):
-        frame_id = frame_data.get('frame_id', 0)
+    print('Processing Named Keypoints Format')
+    keypoint_names_body = [
+        'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
+        'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+        'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
+        'left_knee', 'right_knee', 'left_ankle', 'right_ankle'
+    ]
+    # TODO: add check original feet keypoints implementation
+    keypoint_names_feet = [
+        'left_big_toe', 'left_small_toe', 'left_heel',
+        'right_big_toe', 'right_small_toe', 'right_heel'
+    ]
 
-        for person in frame_data.get('people', []):
-            person_id = str(person.get('person_id', 0))
+    # Face keypoints based on the output keys we saw in eda.ipynb
+    keypoint_names_face = [
+        'jaw_0', 'jaw_1', 'jaw_2', 'jaw_3', 'jaw_4', 'jaw_5', 'jaw_6', 'jaw_7', 'jaw_8',
+        'jaw_9', 'jaw_10', 'jaw_11', 'jaw_12', 'jaw_13', 'jaw_14', 'jaw_15', 'jaw_16',
+        'right_eyebrow_0', 'right_eyebrow_1', 'right_eyebrow_2', 'right_eyebrow_3', 'right_eyebrow_4',
+        'left_eyebrow_0', 'left_eyebrow_1', 'left_eyebrow_2', 'left_eyebrow_3', 'left_eyebrow_4',
+        'nose_bridge_0', 'nose_bridge_1', 'nose_bridge_2', 'nose_bridge_3',
+        'nose_tip_0', 'nose_tip_1', 'nose_tip_2', 'nose_tip_3', 'nose_tip_4',
+        'right_eye_0', 'right_eye_1', 'right_eye_2', 'right_eye_3', 'right_eye_4', 'right_eye_5',
+        'left_eye_0', 'left_eye_1', 'left_eye_2', 'left_eye_3', 'left_eye_4', 'left_eye_5',
+        'mouth_outline_top_0', 'mouth_outline_top_1', 'mouth_outline_top_2', 'mouth_outline_top_3',
+        'mouth_outline_top_4', 'mouth_outline_top_5', 'mouth_outline_top_6',
+        'mouth_outline_bottom_0', 'mouth_outline_bottom_1', 'mouth_outline_bottom_2',
+        'mouth_outline_bottom_3', 'mouth_outline_bottom_4',
+        'mouth_inline_top_0', 'mouth_inline_top_1', 'mouth_inline_top_2', 'mouth_inline_top_3',
+        'mouth_inline_top_4', 'mouth_inline_top_5',
+        'mouth_inline_bottom_0', 'mouth_inline_bottom_1'
+    ]
 
-            # Check if we have whole-body keypoints or separate keypoints
-            if 'keypoints' in person and len(person['keypoints']) > 51 and not ('face_keypoints' in person or 'hand_left_keypoints' in person):
-                # Assume COCO Whole-Body format with flattened keypoints
-                all_keypoints = np.array(person['keypoints']).reshape(-1, 3)
+    # Hand keypoint names
+    keypoint_names_lhand = [
+        'left_hand_root', 'left_thumb1', 'left_thumb2', 'left_thumb3', 'left_thumb4',
+        'left_forefinger1', 'left_forefinger2', 'left_forefinger3', 'left_forefinger4',
+        'left_middle_finger1', 'left_middle_finger2', 'left_middle_finger3', 'left_middle_finger4',
+        'left_ring_finger1', 'left_ring_finger2', 'left_ring_finger3', 'left_ring_finger4',
+        'left_pinky_finger1', 'left_pinky_finger2', 'left_pinky_finger3', 'left_pinky_finger4'
+    ]
 
-                # Split into different body parts
-                # COCO Whole-Body has: 17 body + 6 foot + 68 face + 21 left hand + 21 right hand = 133 joints
-                body_keypoints = all_keypoints[:17]  # Original COCO body keypoints
-                foot_keypoints = all_keypoints[17:23]  # Foot keypoints
-                face_keypoints = all_keypoints[23:91]  # Face keypoints
-                left_hand_keypoints = all_keypoints[91:112]  # Left hand keypoints
-                right_hand_keypoints = all_keypoints[112:133]  # Right hand keypoints
+    keypoint_names_rhand = [
+        'right_hand_root', 'right_thumb1', 'right_thumb2', 'right_thumb3', 'right_thumb4',
+        'right_forefinger1', 'right_forefinger2', 'right_forefinger3', 'right_forefinger4',
+        'right_middle_finger1', 'right_middle_finger2', 'right_middle_finger3', 'right_middle_finger4',
+        'right_ring_finger1', 'right_ring_finger2', 'right_ring_finger3', 'right_ring_finger4',
+        'right_pinky_finger1', 'right_pinky_finger2', 'right_pinky_finger3', 'right_pinky_finger4'
+    ]
 
-                # We don't use foot keypoints in the current implementation
-                _ = foot_keypoints  # Unused but kept for clarity
-            else:
-                # Original format with separate keypoint arrays
-                body_keypoints = np.array(person.get('keypoints', [])).reshape(-1, 3)
-                face_keypoints = np.array(person.get('face_keypoints', [])).reshape(-1, 3)
-                left_hand_keypoints = np.array(person.get('hand_left_keypoints', [])).reshape(-1, 3)
-                right_hand_keypoints = np.array(person.get('hand_right_keypoints', [])).reshape(-1, 3)
+    # Process each frame
 
-            # Create a new person entry if it doesn't exist
-            if person_id not in tracking_results:
-                tracking_results[person_id] = {
-                    'frames': [],
-                    'joints2d': [],
-                    'joints2d_lhand': [],
-                    'joints2d_rhand': [],
-                    'joints2d_face': [],
-                    'vis_face': [],
-                    'vis_lhand': [],
-                    'vis_rhand': [],
-                }
+    for frame_idx, frame_data in enumerate(data):
+        person_data = frame_data['keypoints']
+        person_id = str(0)
 
-            # Add frame data
-            tracking_results[person_id]['frames'].append(frame_id)
-            tracking_results[person_id]['joints2d'].append(body_keypoints)
-            tracking_results[person_id]['joints2d_face'].append(face_keypoints)
-            tracking_results[person_id]['joints2d_lhand'].append(left_hand_keypoints)
-            tracking_results[person_id]['joints2d_rhand'].append(right_hand_keypoints)
+        # Create person entry if not exists
+        if person_id not in tracking_results:
+            tracking_results[person_id] = {
+                'frames': [],
+                'joints2d': [],
+                'joints2d_lhand': [],
+                'joints2d_rhand': [],
+                'joints2d_face': [],
+                'vis_face': [],
+                'vis_lhand': [],
+                'vis_rhand': [],
+            }
 
-            # Calculate visibility scores (mean of confidence values)
-            if len(face_keypoints) > 0:
-                tracking_results[person_id]['vis_face'].append(np.mean(face_keypoints[:, 2]))
-            else:
-                tracking_results[person_id]['vis_face'].append(0.0)
+        # Add frame
+        tracking_results[person_id]['frames'].append(frame_idx)
 
-            if len(left_hand_keypoints) > 0:
-                tracking_results[person_id]['vis_lhand'].append(np.mean(left_hand_keypoints[:, 2]))
-            else:
-                tracking_results[person_id]['vis_lhand'].append(0.0)
+        # Extract body keypoints
+        body_keypoints = np.zeros((len(keypoint_names_body), 3))
+        for i, kp_name in enumerate(keypoint_names_body):
+            if kp_name in person_data:
+                body_keypoints[i] = [
+                    person_data[kp_name].get('x', 0),
+                    person_data[kp_name].get('y', 0),
+                    person_data[kp_name].get('confidence', 0)
+                ]
+        tracking_results[person_id]['joints2d'].append(body_keypoints)
 
-            if len(right_hand_keypoints) > 0:
-                tracking_results[person_id]['vis_rhand'].append(np.mean(right_hand_keypoints[:, 2]))
-            else:
-                tracking_results[person_id]['vis_rhand'].append(0.0)
+        # Extract face keypoints
+        face_keypoints = np.zeros((len(keypoint_names_face), 3))
+        for i, kp_name in enumerate(keypoint_names_face):
+            if kp_name in person_data:
+                face_keypoints[i] = [
+                    person_data[kp_name].get('x', 0),
+                    person_data[kp_name].get('y', 0),
+                    person_data[kp_name].get('confidence', 0)
+                ]
+        tracking_results[person_id]['joints2d_face'].append(face_keypoints)
+
+        # Extract left hand keypoints
+        lhand_keypoints = np.zeros((len(keypoint_names_lhand), 3))
+        for i, kp_name in enumerate(keypoint_names_lhand):
+            if kp_name in person_data:
+                lhand_keypoints[i] = [
+                    person_data[kp_name].get('x', 0),
+                    person_data[kp_name].get('y', 0),
+                    person_data[kp_name].get('confidence', 0)
+                ]
+        tracking_results[person_id]['joints2d_lhand'].append(lhand_keypoints)
+
+        # Extract right hand keypoints
+        rhand_keypoints = np.zeros((len(keypoint_names_rhand), 3))
+        for i, kp_name in enumerate(keypoint_names_rhand):
+            if kp_name in person_data:
+                rhand_keypoints[i] = [
+                    person_data[kp_name].get('x', 0),
+                    person_data[kp_name].get('y', 0),
+                    person_data[kp_name].get('confidence', 0)
+                ]
+        tracking_results[person_id]['joints2d_rhand'].append(rhand_keypoints)
+
+
+        if np.any(face_keypoints[:, 2] > 0):
+            tracking_results[person_id]['vis_face'].append(np.mean(face_keypoints[face_keypoints[:, 2] > 0, 2]))
+        else:
+            tracking_results[person_id]['vis_face'].append(0.0)
+
+        if np.any(lhand_keypoints[:, 2] > 0):
+            tracking_results[person_id]['vis_lhand'].append(np.mean(lhand_keypoints[lhand_keypoints[:, 2] > 0, 2]))
+        else:
+            tracking_results[person_id]['vis_lhand'].append(0.0)
+
+        if np.any(rhand_keypoints[:, 2] > 0):
+            tracking_results[person_id]['vis_rhand'].append(np.mean(rhand_keypoints[rhand_keypoints[:, 2] > 0, 2]))
+        else:
+            tracking_results[person_id]['vis_rhand'].append(0.0)
 
     print(f'Loaded {len(tracking_results)} persons from {json_file}')
     return tracking_results
@@ -381,6 +417,7 @@ def run_demo(args):
                       'vis_rhand': [],
                      }
         person_id_list = list(tracking_results.keys())
+        person_ids = []  # Create person_ids list to match length of frames
         for person_id in person_id_list:
             if args.tracking_method == 'bbox':
                 raise NotImplementedError
@@ -393,6 +430,8 @@ def run_demo(args):
                 wb_kps['vis_rhand'].extend(tracking_results[person_id]['vis_rhand'])
                 wb_kps['vis_face'].extend(tracking_results[person_id]['vis_face'])
 
+            frame_count = len(tracking_results[person_id]['frames'])
+            person_ids.extend([person_id] * frame_count)  # Repeat person_id for each frame
             frames.extend(tracking_results[person_id]['frames'])
 
         if args.pre_load_imgs:
@@ -404,7 +443,7 @@ def run_demo(args):
                 scale=bbox_scale,
                 pre_load_imgs=pre_load_imgs[frames],
                 full_body=True,
-                person_ids=person_id_list,
+                person_ids=person_ids,  # Use the new person_ids list
                 wb_kps=wb_kps,
             )
         else:
@@ -415,7 +454,7 @@ def run_demo(args):
                 joints2d=joints2d,
                 scale=bbox_scale,
                 full_body=True,
-                person_ids=person_id_list,
+                person_ids=person_ids,  # Use the new person_ids list
                 wb_kps=wb_kps,
             )
 
@@ -716,7 +755,7 @@ if __name__ == '__main__':
     parser.add_argument('--anno_file', type=str, default='',
                         help='path to tracking annotation file.')
     parser.add_argument('--keypoints_json', type=str, default='',
-                        help='path to JSON file containing 2D keypoints by frame.')
+                        help='path to JSON file containing 2D keypoints by frame. Only Named Keypoints Format (format #3) is supported. See KEYPOINTS.md for details.')
     parser.add_argument('--render_ratio', type=float, default=1.,
                         help='ratio for render resolution')
     parser.add_argument('--recon_result_file', type=str, default='',

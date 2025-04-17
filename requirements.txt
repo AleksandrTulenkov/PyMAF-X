@@ -1,7 +1,6 @@
-numpy
 scikit-image
 scipy
-sklearn
+scikit-learn
 smplx==0.1.28
 tqdm
 yacs
@@ -23,5 +22,5 @@ boto3
 requests
 easydict
 pycocotools
-openpifpaf==0.13.1
+openpifpaf
 kornia
